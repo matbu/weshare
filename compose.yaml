@@ -1,0 +1,87 @@
+x-db-url: &db-url postgresql://webcams:${POSTGRES_PASSWORD}@postgres:5432/webcams
+
+services:
+
+  postgres:
+    image: postgis/postgis:17-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: webcams
+      POSTGRES_USER: webcams
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # Sized for a ~4 GB VPS; scale shared_buffers to ~25% of RAM.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1536MB}
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - random_page_cost=1.1
+    volumes:
+      - ${DATA_DIR:-/data/webcams}/postgres:/var/lib/postgresql/data
+    ports:
+      # Only reachable from the VPS itself (SSH tunnel for psql / DBeaver).
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U webcams -d webcams"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2
+    command: ["--wait", "up"]
+    environment:
+      DATABASE_URL: postgresql://webcams:${POSTGRES_PASSWORD}@postgres:5432/webcams?sslmode=disable
+      DBMATE_MIGRATIONS_DIR: /db/migrations
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes:
+      - ./db:/db:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  collector:
+    build: ./collector
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: *db-url
+      BOT_USER_AGENT: ${BOT_USER_AGENT}
+      WINDY_API_KEY: ${WINDY_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: *db-url
+      JWT_SECRET: ${JWT_SECRET}
+      BOT_USER_AGENT: ${BOT_USER_AGENT}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      ROOT_PATH: /api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web:/srv/web:ro
+      - ${DATA_DIR:-/data/webcams}/caddy:/data
+    depends_on:
+      - api

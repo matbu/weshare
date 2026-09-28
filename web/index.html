@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>World Webcams</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <strong class="logo">World Webcams</strong>
+    <nav>
+      <button data-view="map" class="tab active">Carte</button>
+      <button data-view="discover" class="tab">Découvrir</button>
+    </nav>
+    <div class="account">
+      <button id="add-btn" class="primary">+ Ajouter</button>
+      <button id="login-btn">Connexion</button>
+      <button id="logout-btn" hidden>Déconnexion</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="view-map" class="view active">
+      <div id="map"></div>
+      <div id="stats" class="stats"></div>
+    </section>
+
+    <section id="view-discover" class="view">
+      <div class="deck">
+        <article id="card" class="card">
+          <div class="media" id="card-media"></div>
+          <div class="card-info">
+            <h2 id="card-title"></h2>
+            <p id="card-place"></p>
+          </div>
+        </article>
+        <div class="deck-actions">
+          <button id="next-btn" class="primary">Suivante →</button>
+          <button id="show-on-map-btn">Voir sur la carte</button>
+        </div>
+        <p class="hint">Glissez la carte à gauche ou à droite · flèches du clavier</p>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="auth-dialog">
+    <form id="auth-form" method="dialog">
+      <h3 id="auth-title">Connexion</h3>
+      <label>E-mail <input name="email" type="email" required autocomplete="email"></label>
+      <label>Mot de passe <input name="password" type="password" required minlength="8" autocomplete="current-password"></label>
+      <label id="display-name-field" hidden>Pseudo <input name="display_name" maxlength="80"></label>
+      <p class="error" id="auth-error"></p>
+      <div class="actions">
+        <button type="button" id="auth-switch" class="link">Créer un compte</button>
+        <button type="button" data-close>Annuler</button>
+        <button type="submit" class="primary">Valider</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="add-dialog">
+    <form id="add-form" method="dialog">
+      <h3>Ajouter une webcam</h3>
+      <label>Nom <input name="name" required minlength="2" maxlength="200"></label>
+      <label>URL de l'image / du flux <input name="media_url" type="url" placeholder="https://…/current.jpg, .m3u8, YouTube…"></label>
+      <label>Page web de la webcam <input name="page_url" type="url" placeholder="https://…"></label>
+      <div class="row">
+        <label>Latitude <input name="latitude" type="number" step="any" min="-90" max="90" required></label>
+        <label>Longitude <input name="longitude" type="number" step="any" min="-180" max="180" required></label>
+      </div>
+      <button type="button" id="pick-btn" class="link">📍 Choisir la position sur la carte</button>
+      <label>Description <textarea name="description" maxlength="2000" rows="2"></textarea></label>
+      <p class="error" id="add-error"></p>
+      <div class="actions">
+        <button type="button" data-close>Annuler</button>
+        <button type="submit" class="primary">Envoyer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
