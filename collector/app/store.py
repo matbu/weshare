@@ -1,9 +1,11 @@
 """Normalised records -> canonical webcams, with cross-source deduplication."""
 
+import time
 from dataclasses import dataclass, field
 
 import psycopg
 from psycopg.types.json import Jsonb
+from webcam_policy import is_blocked
 
 # Two records from *different* sources are the same camera if they are closer than
 # MERGE_TIGHT_M, or closer than MERGE_NAMED_M with similar names.
@@ -13,13 +15,6 @@ NAME_SIMILARITY = 0.4
 
 # Endpoint types we cannot health-check ourselves: trusted on insert.
 TRUSTED_TYPES = {"youtube", "iframe"}
-
-# Preview preference: a snapshot loads instantly everywhere; then live video; then players.
-PREVIEW_ORDER = (
-    "CASE e.type WHEN 'image' THEN 0 WHEN 'hls' THEN 1 WHEN 'mjpeg' THEN 2 WHEN 'dash' THEN 3 "
-    "WHEN 'youtube' THEN 4 WHEN 'mp4' THEN 5 WHEN 'iframe' THEN 6 ELSE 7 END"
-)
-
 
 @dataclass
 class Endpoint:
@@ -129,33 +124,33 @@ VALUES (%s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT DO NOTHING
 """
 
-REFRESH_LIVE = f"""
-UPDATE webcams w SET
-    preview_endpoint_id = p.endpoint_id,
-    is_live = p.endpoint_id IS NOT NULL,
-    updated_at = now()
-FROM (
-    SELECT wid, (
-        SELECT e.id FROM webcam_endpoints e
-        WHERE e.webcam_id = wid AND e.is_working
-        ORDER BY {PREVIEW_ORDER}, e.id
-        LIMIT 1
-    ) AS endpoint_id
-    FROM unnest(%s::bigint[]) AS wid
-) p
-WHERE w.id = p.wid
-  AND (w.preview_endpoint_id IS DISTINCT FROM p.endpoint_id
-       OR w.is_live IS DISTINCT FROM (p.endpoint_id IS NOT NULL))
-"""
-
-
 async def _one(conn: psycopg.AsyncConnection, sql: str, params) -> dict | None:
     cur = await conn.execute(sql, params)
     return await cur.fetchone()
 
 
+_blocked: tuple[float, frozenset[str]] = (0.0, frozenset())
+
+
+async def blocked_hosts(conn: psycopg.AsyncConnection) -> frozenset[str]:
+    """Hosts whose owners opted out (cached one minute)."""
+    global _blocked
+    if time.monotonic() - _blocked[0] > 60:
+        cur = await conn.execute("SELECT host FROM blocked_hosts")
+        _blocked = (time.monotonic(), frozenset(r["host"] for r in await cur.fetchall()))
+    return _blocked[1]
+
+
 async def upsert(conn: psycopg.AsyncConnection, rec: WebcamRecord, origin: str | None = None) -> str:
-    """Returns 'inserted', 'updated' or 'duplicate' (attached to an existing webcam)."""
+    """Returns 'inserted', 'updated', 'duplicate' (attached to an existing webcam) or 'blocked'."""
+    blocked = await blocked_hosts(conn)
+    if blocked:
+        had_endpoints = bool(rec.endpoints)
+        rec.endpoints = [ep for ep in rec.endpoints if not is_blocked(ep.url, blocked)]
+        if is_blocked(rec.webpage_url, blocked):
+            rec.webpage_url = None
+        if had_endpoints and not rec.endpoints:
+            return "blocked"  # the owner opted out: do not bring the webcam back
     p = rec.params()
 
     row = await _one(conn, FIND_BY_SOURCE, p)
@@ -198,14 +193,21 @@ async def upsert(conn: psycopg.AsyncConnection, rec: WebcamRecord, origin: str |
                 True if ep.type in TRUSTED_TYPES else None,
             ),
         )
-    if any(ep.type in TRUSTED_TYPES for ep in rec.endpoints):
-        await refresh_live(conn, [webcam_id])
+    # Preview, live flag and source visibility (a merge may add an enabled source).
+    await refresh_live(conn, [webcam_id])
     return outcome
 
 
 async def refresh_live(conn: psycopg.AsyncConnection, webcam_ids: list[int]) -> None:
+    """Recompute preview endpoint, is_live and source visibility (SQL function refresh_webcams)."""
     if webcam_ids:
-        await conn.execute(REFRESH_LIVE, (list(set(webcam_ids)),))
+        await conn.execute("SELECT refresh_webcams(%s::bigint[])", (list(set(webcam_ids)),))
+
+
+async def source_enabled(conn: psycopg.AsyncConnection, source: str) -> bool:
+    cur = await conn.execute("SELECT enabled FROM sources WHERE name = %s", (source,))
+    row = await cur.fetchone()
+    return row is None or row["enabled"]
 
 
 async def delete_stale_sources(conn: psycopg.AsyncConnection, source: str, seen_since) -> int:

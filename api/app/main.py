@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import db
 from .config import settings
-from .routers import auth, stats, submissions, tiles, webcams
+from .routers import auth, removals, sources, stats, submissions, tiles, webcams
 
 
 @asynccontextmanager
@@ -22,10 +22,13 @@ app.add_middleware(
     allow_origins=list(settings.cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["ETag", "X-Image-Updated"],
 )
 
 app.include_router(webcams.router)
 app.include_router(submissions.router)
+app.include_router(removals.router)
+app.include_router(sources.router)
 app.include_router(tiles.router)
 app.include_router(auth.router)
 app.include_router(stats.router)

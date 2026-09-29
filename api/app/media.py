@@ -21,6 +21,10 @@ def classify_url(url: str) -> str:
         return "youtube"
     if path.endswith(".m3u8"):
         return "hls"
+    if path.endswith(".mpd"):
+        return "dash"
+    if path.endswith((".mp4", ".m4v", ".mov", ".webm")):
+        return "mp4"
     if MJPEG_PATTERNS.search(full):
         return "mjpeg"
     if path.endswith(IMAGE_EXT) or IMAGE_PATTERNS.search(full):

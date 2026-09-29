@@ -30,7 +30,7 @@ WITH b AS (
 pts AS (
     SELECT w.id, w.name, w.is_live, ST_Transform(w.geom, 3857) AS g
     FROM webcams w, b
-    WHERE w.status = 'approved' AND w.geom && b.env4326
+    WHERE w.status = 'approved' AND w.source_enabled AND w.geom && b.env4326
 ),
 clusters AS (
     SELECT ST_Centroid(ST_Collect(g)) AS g,
@@ -56,7 +56,7 @@ SELECT ST_AsMVT(t, 'webcams', {EXTENT}, 'geom') FROM (
     SELECT w.id, w.name, 1 AS count, w.is_live::int AS live,
            ST_AsMVTGeom(ST_Transform(w.geom, 3857), b.env, {EXTENT}, 64, true) AS geom
     FROM webcams w, b
-    WHERE w.status = 'approved' AND w.geom && b.env4326
+    WHERE w.status = 'approved' AND w.source_enabled AND w.geom && b.env4326
     LIMIT 20000
 ) t
 """

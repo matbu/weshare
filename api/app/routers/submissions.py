@@ -2,6 +2,9 @@
 the collector health-checks their media URL in the meantime."""
 
 from fastapi import APIRouter, Depends, HTTPException
+from webcam_policy import is_blocked
+
+from .. import snapshots
 
 from ..config import settings
 from ..db import get_pool
@@ -16,6 +19,9 @@ router = APIRouter(tags=["submissions"])
 @router.post("/webcams", response_model=WebcamSummary, status_code=201)
 async def submit_webcam(body: WebcamSubmission, user: dict = Depends(current_user)):
     urls = [str(u) for u in (body.media_url, body.page_url) if u]
+    blocked = await snapshots.blocked_hosts()
+    if any(is_blocked(u, blocked) for u in urls):
+        raise HTTPException(422, "the owner of this site asked us not to show its webcams")
     for url in urls:
         try:
             await assert_public_url(url)
@@ -33,8 +39,9 @@ async def submit_webcam(body: WebcamSubmission, user: dict = Depends(current_use
     pool = get_pool()
     async with pool.acquire() as conn, conn.transaction():
         existing = await conn.fetchval(
-            "SELECT webcam_id FROM webcam_endpoints WHERE md5(url) = ANY(SELECT md5(u) FROM unnest($1::text[]) u)",
-            urls,
+            "SELECT webcam_id FROM webcam_endpoints WHERE type NOT IN ('page', 'iframe') "
+            "AND md5(url) = ANY(SELECT md5(u) FROM unnest($1::text[]) u)",
+            [url for kind, url in endpoints if kind != "page"],
         )
         if existing:
             raise HTTPException(409, {"message": "webcam already known", "webcam_id": existing})

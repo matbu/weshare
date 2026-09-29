@@ -14,6 +14,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
 import psycopg
+from webcam_policy import is_blocked
 
 from .. import db, geo, providers, store
 from ..config import settings
@@ -129,6 +130,9 @@ async def _page_gone(conn, page: dict, tracker: RunTracker) -> None:
 
 async def _discover(client: PoliteClient, conn, page: dict, tracker: RunTracker) -> None:
     url = page["url"]
+    if is_blocked(url, await store.blocked_hosts(conn)):
+        tracker.incr("blocked")
+        return
     try:
         if not await client.allowed_by_robots(url):
             tracker.incr("robots_denied")
@@ -169,13 +173,15 @@ async def _discover(client: PoliteClient, conn, page: dict, tracker: RunTracker)
     except LookupError:
         html = resp.body.decode("utf-8", "replace")
 
+    blocked = await store.blocked_hosts(conn)
     found = await providers.extract(client, resp, html)
     origin = "provider"
     if found is None:
         origin = "discovery"
         found = [providers.Found(kind, media_url) for kind, media_url in extract_candidates(html, resp.url)]
     for item in found:
-        await _add(conn, page, item, origin, tracker)
+        if not is_blocked(item.url, blocked):
+            await _add(conn, page, item, origin, tracker)
 
     # Whatever we found, the provider's own player is the richest view (360°, timelapse,
     # live video): offer it when the site allows embedding.

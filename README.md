@@ -14,10 +14,20 @@ exposition via une API, une carte open source et un fil « swipe » aléatoire.
 ## Démarrage
 
 ```bash
-cp .env.example .env        # remplir POSTGRES_PASSWORD, JWT_SECRET, BOT_USER_AGENT, DOMAIN
-docker compose up -d --build
-docker compose logs -f collector
+BOT_CONTACT=https://mon-site.fr/bot ADMIN_EMAIL=moi@example.com scripts/init.sh
+scripts/status.sh            # avancement du collector
 ```
+
+`scripts/init.sh` est idempotent (relançable pour mettre à jour) : génère `.env` avec des secrets
+aléatoires s'il n'existe pas, crée les dossiers de données, build, démarre, attend les migrations,
+vérifie API / site / collector, et crée ou promeut le compte admin.
+
+Derrière un reverse proxy existant (Apache, Traefik), publier en local :
+`HTTP_PUBLISH=127.0.0.1:8210 HTTPS_PUBLISH=127.0.0.1:8211 PG_PUBLISH=127.0.0.1:8212 DATA_DIR=/srv/data/webcams scripts/init.sh`
+
+> **User-Agent** : Overpass (HTTP 406) et Wikimedia (HTTP 400/403) refusent les UA sans contact
+> réel ou avec un contact bidon (`example.com`). Mettre une vraie URL ou adresse dans `BOT_CONTACT`
+> (ou `BOT_USER_AGENT` dans `.env`).
 
 - Site : `http://<vps>/` (ou `https://<DOMAIN>/`), doc API : `/api/docs`
 - Les données persistantes sont dans `${DATA_DIR}` (`/data/webcams` par défaut).
@@ -52,6 +62,56 @@ docker compose exec postgres psql -U webcams -c "UPDATE users SET role='admin' W
 | Nominatim | géocodage inverse **offline** (`reverse_geocoder`, GeoNames) | politique Nominatim + zéro dépendance réseau |
 | Migrations dans `docker-entrypoint-initdb.d` | `dbmate` (`db/migrations`) | le schéma pourra évoluer sans reset de la base |
 | — | comptes (argon2 + JWT), ajout de webcams modéré, garde anti-SSRF | les URL utilisateurs sont appelées par le serveur |
+
+## Voir les webcams « en live »
+
+La plupart des webcams du monde sont des **images rafraîchies** (toutes les 1 à 10 min), pas de la
+vidéo. Ce qui est affiché, par ordre de préférence :
+
+| Type | Comment | Rafraîchissement |
+|---|---|---|
+| `image` | proxy `/api/webcams/{id}/snapshot` (HTTPS, cache partagé, requêtes conditionnelles) | toutes les 3 s côté site (servi par le cache) ; la source est interrogée toutes les 3 s tant que l'image change, puis de plus en plus rarement (jusqu'à 60 s) tant qu'elle ne change pas, quel que soit le nombre de spectateurs |
+| `hls` / `mjpeg` / `youtube` | lecture directe | vrai direct |
+| `iframe` | lecteur du fournisseur (panorama 360°, timelapse…) si la page autorise l'intégration | celui du fournisseur |
+
+Le job *discovery* transforme les pages web (90 % des liens OSM) en médias :
+extracteurs dédiés dans `collector/app/providers.py` (Roundshot, webcam-hd/Trinum, Skaping), extraction
+générique sinon, et la page elle-même en `iframe` quand `X-Frame-Options` / CSP l'autorisent.
+Skaping n'a pas d'URL stable : l'endpoint garde la page et `resolver = 'skaping'`
+(`shared/webcam_resolvers.py`, utilisé par le health check et par le proxy).
+
+**Détection des flux** (`collector/app/probe.py`) : décidée d'après ce que l'URL sert réellement,
+jamais d'après l'URL seule. Content-Type d'abord, puis signature des premiers octets : JPEG `FF D8 FF`,
+MJPEG = au moins 2 images JPEG dans un `multipart/x-mixed-replace`, HLS `#EXTM3U` (playlist maître
+suivie jusqu'à un segment qui doit répondre ; `#EXT-X-ENDLIST` = enregistrement), DASH `<MPD`
+(`type="dynamic"` = direct), MP4 boîte `ftyp`/`moov`/`moof` (enregistrement). Le téléchargement s'arrête
+dès que la réponse est connue. Un endpoint dont le contenu ne correspond pas à son type est reclassé
+et revérifié aussitôt. Le MPEG-TS brut et le RTSP ne sont pas lisibles par un navigateur : ignorés.
+
+Une image est considérée **figée** (retirée du fil live) si elle n'a pas changé depuis 48 h ou si la
+source annonce un `Last-Modified` de plus de 48 h.
+
+Ajouter un fournisseur : une fonction dans `providers.py` (+ un resolver si l'URL change à chaque
+capture), un test dans `collector/tests/test_providers.py`.
+
+## Modération, sources et retraits
+
+Page **`/admin.html`** (compte `moderator` ou `admin`, lien « Modération » dans le menu ☰) :
+
+- **Sources** : activer / désactiver OSM, Windy, ajouts utilisateurs. Une source désactivée : ses
+  webcams sont masquées (sauf si une autre source active les recense), ses lecteurs ne sont plus
+  proposés, sa collecte s'arrête (y compris un import en cours). Rien n'est supprimé.
+- **Demandes de retrait** (formulaire public « Retirer ma webcam ») : une demande pour une webcam la
+  masque immédiatement ; le modérateur la retire définitivement, la rétablit, ou bloque tout le site.
+- **Sites bloqués** : plus de collecte, d'intégration ni de proxy pour ces hôtes.
+- **Webcams en attente** : ajouts des utilisateurs à publier ou refuser.
+
+**Politique d'affichage** (`shared/webcam_policy.py`) : les images des fournisseurs commerciaux
+(Roundshot, Skaping, Trinum, Panomax, foto-webcam, Windy…) ne passent jamais par notre proxy ; on affiche
+leur lecteur ou leur image servie par eux. Le proxy est réservé aux caméras publiques / open data.
+Les lecteurs tiers (YouTube, Windy, fournisseurs) ne sont chargés qu'avec le consentement du visiteur.
+Mentions légales et confidentialité : `web/legal.html` (champs éditeur **à compléter**).
+Stratégie de partenariats et modèles d'e-mail : [`docs/partenariats.md`](docs/partenariats.md).
 
 ## Ne pas se faire bannir
 

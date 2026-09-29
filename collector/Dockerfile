@@ -7,7 +7,7 @@ WORKDIR /srv
 COPY collector/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY shared/webcam_resolvers.py ./
+COPY shared/*.py ./
 COPY collector/app ./app
 
 RUN useradd --system --uid 10001 collector

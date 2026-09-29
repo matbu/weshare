@@ -214,7 +214,7 @@ async def _collect_tile(
     async with conn.transaction():
         for rec in records:
             outcome = await store.upsert(conn, rec)
-            tracker.incr({"inserted": "inserted", "updated": "updated"}.get(outcome, "duplicates"))
+            tracker.incr({"inserted": "inserted", "updated": "updated", "blocked": "blocked"}.get(outcome, "duplicates"))
     log.info("overpass: tile %s -> %d webcams", bbox, len(records))
 
 
@@ -224,9 +224,17 @@ async def run(client: PoliteClient, tracker: RunTracker, bbox: Bbox | None = Non
 
     tiles = [bbox] if bbox else world_tiles()
     async with await db.connect(autocommit=True) as conn:
+        if not await store.source_enabled(conn, SOURCE):
+            log.info("osm: source disabled by a moderator, skipping")
+            tracker.incr("skipped_disabled")
+            return
         tracker.incr("filtered", await drop_filtered(conn))
         failed: list[Bbox] = []
         for tile in tiles:
+            if not await store.source_enabled(conn, SOURCE):  # switched off during the run
+                log.info("osm: source disabled during the run, stopping")
+                tracker.incr("stopped_disabled")
+                return
             await _collect_tile(client, conn, tracker, tile, failed)
 
         # Busy public instances: give them a break, then one more pass on failed tiles.

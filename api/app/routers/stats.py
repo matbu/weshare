@@ -12,10 +12,10 @@ async def stats():
     pool = get_pool()
     totals = await pool.fetchrow(
         """
-        SELECT count(*) FILTER (WHERE status = 'approved') AS webcams,
-               count(*) FILTER (WHERE status = 'approved' AND is_live) AS live,
+        SELECT count(*) FILTER (WHERE status = 'approved' AND source_enabled) AS webcams,
+               count(*) FILTER (WHERE status = 'approved' AND source_enabled AND is_live) AS live,
                count(*) FILTER (WHERE status = 'pending') AS pending,
-               count(DISTINCT country_code) AS countries
+               count(DISTINCT country_code) FILTER (WHERE status = 'approved' AND source_enabled) AS countries
         FROM webcams
         """
     )

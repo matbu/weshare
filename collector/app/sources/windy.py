@@ -26,6 +26,8 @@ MAX_SPLIT_DEPTH = 6
 
 
 def extract(cam: dict) -> WebcamRecord | None:
+    if cam.get("status", "active") != "active":
+        return None
     loc = cam.get("location") or {}
     lat, lon = loc.get("latitude"), loc.get("longitude")
     if lat is None or lon is None:
@@ -58,7 +60,7 @@ async def _page(client: PoliteClient, bbox: Bbox, offset: int) -> dict:
     resp = await client.fetch(
         API_URL,
         params={
-            # v3 expects north_lat,east_lon,south_lat,west_lon
+            # north_lat,east_lon,south_lat,west_lon (verified against the live API)
             "bbox": f"{n},{e},{s},{w}",
             "limit": PAGE_SIZE,
             "offset": offset,
@@ -101,7 +103,7 @@ async def _collect_bbox(client, conn, tracker: RunTracker, bbox: Bbox, depth: in
     async with conn.transaction():
         for rec in records:
             outcome = await store.upsert(conn, rec)
-            tracker.incr({"inserted": "inserted", "updated": "updated"}.get(outcome, "duplicates"))
+            tracker.incr({"inserted": "inserted", "updated": "updated", "blocked": "blocked"}.get(outcome, "duplicates"))
 
 
 async def run(client: PoliteClient, tracker: RunTracker, bbox: Bbox | None = None) -> None:
@@ -110,7 +112,15 @@ async def run(client: PoliteClient, tracker: RunTracker, bbox: Bbox | None = Non
         return
     client.set_host_interval("api.windy.com", 1.5)
     async with await db.connect(autocommit=True) as conn:
+        if not await store.source_enabled(conn, SOURCE):
+            log.info("windy: source disabled by a moderator, skipping")
+            tracker.incr("skipped_disabled")
+            return
         for tile in [bbox] if bbox else world_tiles():
+            if not await store.source_enabled(conn, SOURCE):  # switched off during the run
+                log.info("windy: source disabled during the run, stopping")
+                tracker.incr("stopped_disabled")
+                return
             await _collect_bbox(client, conn, tracker, tile)
         if bbox is None and tracker.counts["errors"] == 0:
             async with conn.transaction():

@@ -3,12 +3,16 @@ from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, HttpUrl, model_validator
 
+from webcam_policy import is_commercial
+
 from .config import settings
 
 
 class Preview(BaseModel):
-    type: str
+    type: str          # image / mjpeg / hls / dash / mp4 / youtube / iframe
     url: str
+    live: bool | None = None  # True: live stream, False: recording, None: not a stream
+    proxied: bool = False     # image served by our snapshot proxy (else loaded from the source)
 
 
 class WebcamSummary(BaseModel):
@@ -22,19 +26,23 @@ class WebcamSummary(BaseModel):
     is_live: bool
     status: str
     preview: Preview | None
+    embed_url: str | None = None   # provider player (360°, timelapse, live) when embeddable
+    page_url: str | None = None    # web page of the webcam
     distance_m: float | None = None
 
     @classmethod
     def from_row(cls, row) -> "WebcamSummary":
         preview = None
-        if row["preview_type"]:
-            # Images go through our caching proxy: HTTPS, no hotlink issue, 1 hit/min on the source.
-            url = (
-                f"{settings.root_path}/webcams/{row['id']}/snapshot"
-                if row["preview_type"] == "image"
-                else row["preview_url"]
-            )
-            preview = Preview(type=row["preview_type"], url=url)
+        kind, url = row["preview_type"], row["preview_url"]
+        if kind == "image" and not is_commercial(url):
+            # Open / public camera: our caching proxy (HTTPS, shared cache, polite polling).
+            preview = Preview(type=kind, url=f"{settings.root_path}/webcams/{row['id']}/snapshot", proxied=True)
+        elif kind == "image":
+            # Commercial provider: never re-served by us. The browser loads their image directly,
+            # unless its URL is only known through the provider page (resolver): then their player.
+            preview = None if row.get("preview_resolver") else Preview(type=kind, url=url)
+        elif kind:
+            preview = Preview(type=kind, url=url, live=row.get("preview_live"))
         return cls(
             id=row["id"],
             name=row["name"],
@@ -46,6 +54,8 @@ class WebcamSummary(BaseModel):
             is_live=row["is_live"],
             status=row["status"],
             preview=preview,
+            embed_url=row.get("embed_url"),
+            page_url=row.get("page_url"),
             distance_m=row.get("distance_m"),
         )
 
@@ -56,6 +66,7 @@ class EndpointOut(BaseModel):
     url: str
     origin: str
     is_working: bool | None
+    live: bool | None
     width: int | None
     height: int | None
     last_success: datetime | None
@@ -81,7 +92,9 @@ class WebcamSubmission(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
-    media_url: HttpUrl | None = Field(default=None, description="JPEG snapshot, HLS (.m3u8), MJPEG or YouTube URL")
+    media_url: HttpUrl | None = Field(
+        default=None, description="JPEG snapshot, MJPEG, HLS (.m3u8), DASH (.mpd), MP4 or YouTube URL"
+    )
     page_url: HttpUrl | None = Field(default=None, description="Web page showing the webcam")
 
     @model_validator(mode="after")

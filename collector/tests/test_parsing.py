@@ -140,3 +140,7 @@ def test_evaluate_old_last_modified_is_frozen_immediately():
     assert not state["ok"] and state["error"] == "frozen image"
     recent = Check(True, 200, content_hash="a", last_modified=now.strftime("%a, %d %b %Y %H:%M:%S GMT"))
     assert evaluate(_ep(), recent, now)["ok"]
+
+
+def test_windy_skips_inactive():
+    assert windy.extract({"webcamId": 1, "status": "inactive", "location": {"latitude": 1, "longitude": 1}}) is None

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Modération</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="doc">
+  <header>
+    <a class="logo" href="./">World Webcams</a>
+    <span class="muted" id="who"></span>
+  </header>
+  <main class="doc-body admin">
+    <h1>Modération</h1>
+    <p id="denied" class="todo" hidden>Connectez-vous sur le site avec un compte modérateur, puis revenez sur cette page.</p>
+
+    <section id="panels" hidden>
+      <h2>Sources</h2>
+      <p class="muted">Désactiver une source masque ses webcams (sauf si une autre source active les recense aussi),
+        retire ses lecteurs et arrête sa collecte. Rien n'est supprimé : on peut la réactiver à tout moment.</p>
+      <table id="sources"></table>
+
+      <h2>Demandes de retrait <span class="count" id="removals-count"></span></h2>
+      <div id="removals" class="cards"></div>
+
+      <h2>Webcams en attente <span class="count" id="pending-count"></span></h2>
+      <p class="muted">Webcams proposées par les utilisateurs, ou masquées par une demande de retrait.</p>
+      <div id="pending" class="cards"></div>
+
+      <h2>Sites bloqués</h2>
+      <form id="block-form" class="inline-form">
+        <input name="url" placeholder="exemple.com ou https://exemple.com/webcam" required>
+        <input name="reason" placeholder="Raison (optionnel)">
+        <button class="primary">Bloquer</button>
+      </form>
+      <table id="blocked"></table>
+    </section>
+  </main>
+  <div id="toast" class="toast" hidden></div>
+  <script src="admin.js"></script>
+</body>
+</html>

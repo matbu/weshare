@@ -1,3 +1,5 @@
+name: ${COMPOSE_PROJECT_NAME:-webcams}
+
 x-db-url: &db-url postgresql://webcams:${POSTGRES_PASSWORD}@postgres:5432/webcams
 
 services:
@@ -25,8 +27,8 @@ services:
     volumes:
       - ${DATA_DIR:-/data/webcams}/postgres:/var/lib/postgresql/data
     ports:
-      # Only reachable from the VPS itself (SSH tunnel for psql / DBeaver).
-      - "127.0.0.1:5432:5432"
+      # Only reachable from the host itself (SSH tunnel for psql / DBeaver).
+      - "${PG_PUBLISH:-127.0.0.1:5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U webcams -d webcams"]
       interval: 10s
@@ -47,7 +49,9 @@ services:
         condition: service_healthy
 
   collector:
-    build: ./collector
+    build:
+      context: .
+      dockerfile: collector/Dockerfile
     restart: unless-stopped
     environment:
       DATABASE_URL: *db-url
@@ -59,7 +63,9 @@ services:
         condition: service_completed_successfully
 
   api:
-    build: ./api
+    build:
+      context: .
+      dockerfile: api/Dockerfile
     restart: unless-stopped
     environment:
       DATABASE_URL: *db-url
@@ -67,6 +73,7 @@ services:
       BOT_USER_AGENT: ${BOT_USER_AGENT}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       ROOT_PATH: /api
+      WEB_CONCURRENCY: ${API_WORKERS:-2}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -77,8 +84,9 @@ services:
     environment:
       DOMAIN: ${DOMAIN:-:80}
     ports:
-      - "80:80"
-      - "443:443"
+      # Standalone VPS: 80/443. Behind another reverse proxy: e.g. 127.0.0.1:8210 / 127.0.0.1:8211
+      - "${HTTP_PUBLISH:-80}:80"
+      - "${HTTPS_PUBLISH:-443}:443"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./web:/srv/web:ro

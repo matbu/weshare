@@ -15,6 +15,15 @@
       <button data-view="discover" class="tab">Découvrir</button>
     </nav>
     <div class="account">
+      <details class="menu">
+        <summary aria-label="Informations">☰</summary>
+        <nav class="menu-items">
+          <a href="#" data-open-removal>Retirer ma webcam</a>
+          <a href="legal.html">Mentions légales &amp; confidentialité</a>
+          <a href="#" data-open-consent>Cookies &amp; contenus tiers</a>
+          <a href="admin.html" id="admin-link" hidden>Modération</a>
+        </nav>
+      </details>
       <button id="add-btn" class="primary">+ Ajouter</button>
       <button id="login-btn">Connexion</button>
       <button id="logout-btn" hidden>Déconnexion</button>
@@ -64,7 +73,7 @@
     <form id="add-form" method="dialog">
       <h3>Ajouter une webcam</h3>
       <label>Nom <input name="name" required minlength="2" maxlength="200"></label>
-      <label>URL de l'image / du flux <input name="media_url" type="url" placeholder="https://…/current.jpg, .m3u8, YouTube…"></label>
+      <label>URL de l'image / du flux <input name="media_url" type="url" placeholder="https://…/current.jpg, .m3u8, .mpd, .mp4, YouTube…"></label>
       <label>Page web de la webcam <input name="page_url" type="url" placeholder="https://…"></label>
       <div class="row">
         <label>Latitude <input name="latitude" type="number" step="any" min="-90" max="90" required></label>
@@ -80,10 +89,45 @@
     </form>
   </dialog>
 
+  <dialog id="removal-dialog">
+    <form id="removal-form" method="dialog">
+      <h3>Signaler ou retirer une webcam</h3>
+      <p class="hint-text">Vous êtes propriétaire d'une webcam affichée ici et ne souhaitez plus qu'elle le soit ?
+        Une demande pour une webcam la masque immédiatement, en attendant notre vérification.</p>
+      <p id="removal-target" class="hint-text"></p>
+      <fieldset class="row">
+        <label class="radio"><input type="radio" name="scope" value="webcam" checked> Cette webcam</label>
+        <label class="radio"><input type="radio" name="scope" value="site"> Toutes les webcams de mon site</label>
+      </fieldset>
+      <input type="hidden" name="webcam_id">
+      <label>Adresse de la webcam ou de votre site <input name="url" type="url" placeholder="https://…"></label>
+      <label>Votre e-mail <input name="email" type="email" required autocomplete="email"></label>
+      <label>Nom / organisation <input name="requester" maxlength="200"></label>
+      <label>Message <textarea name="message" rows="3" maxlength="4000" placeholder="Problème constaté, justification de propriété…"></textarea></label>
+      <label class="hp" aria-hidden="true">Ne pas remplir <input name="website" tabindex="-1" autocomplete="off"></label>
+      <p class="error" id="removal-error"></p>
+      <div class="actions">
+        <button type="button" data-close>Annuler</button>
+        <button type="submit" class="primary">Envoyer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="consent-banner" class="consent-banner" hidden>
+    <p>Certaines webcams sont affichées avec le lecteur de leur fournisseur (YouTube, Windy, sites de stations…),
+      qui peut déposer des cookies. Vous pouvez les autoriser ou non ; sans elles, nous affichons une image quand c'est possible.
+      <a href="legal.html#cookies">En savoir plus</a></p>
+    <div class="actions">
+      <button type="button" id="consent-refuse">Refuser</button>
+      <button type="button" id="consent-accept" class="primary">Autoriser</button>
+    </div>
+  </div>
+
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dashjs@4.7.4/dist/dash.all.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

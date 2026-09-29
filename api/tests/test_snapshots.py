@@ -8,11 +8,15 @@ from app import snapshots
 
 
 class FakePool:
-    def __init__(self, row):
+    def __init__(self, row, blocked=()):
         self.row = row
+        self.blocked = blocked
 
     async def fetchrow(self, *args):
         return self.row
+
+    async def fetch(self, *args):
+        return [{"host": h} for h in self.blocked]
 
 
 @pytest.fixture
@@ -31,11 +35,13 @@ def source(monkeypatch):
 
     monkeypatch.setattr(snapshots, "_fetch", fake_fetch)
     snapshots._cache.clear()
+    snapshots._blocked = (0.0, frozenset())
     return state
 
 
-def use_endpoint(monkeypatch, url, resolver=None):
-    monkeypatch.setattr(snapshots, "get_pool", lambda: FakePool({"url": url, "resolver": resolver}))
+def use_endpoint(monkeypatch, url, resolver=None, blocked=()):
+    pool = FakePool({"url": url, "resolver": resolver}, blocked)
+    monkeypatch.setattr(snapshots, "get_pool", lambda: pool)
 
 
 def expire(webcam_id):
@@ -73,9 +79,10 @@ def test_failure_without_previous_image(monkeypatch, source):
     assert exc.value.status_code == 502
 
 
-def test_skaping_resolver(monkeypatch, source):
-    page = "https://www.skaping.com/valmorel/planchamp"
-    image = "https://skaping.s3.gra.io.cloud.ovh.net/valmorel/planchamp/2026/09/28/large/23-00.jpg"
+def test_resolver(monkeypatch, source):
+    # resolver endpoints of a non-commercial provider (og:image convention)
+    page = "https://open-provider.example/cams/planchamp"
+    image = "https://cdn.open-provider.example/planchamp/2026/09/28/large/23-00.jpg"
     use_endpoint(monkeypatch, page, resolver="skaping")
     source["responses"][page] = [(200, {}, f'<meta property="og:image" content="{image}">'.encode())]
     source["responses"][image] = [(200, {"content-type": "image/jpeg"}, b"\xff\xd8sk")]
@@ -100,3 +107,15 @@ def test_interval_backs_off_while_unchanged_and_resets_on_change(monkeypatch, so
     for _ in range(6):
         snapshots._cache[5] = snapshots.replace(snapshots._cache[5], interval=snapshots._slower(snapshots._cache[5]))
     assert snapshots._cache[5].interval == snapshots.MAX_INTERVAL
+
+
+def test_commercial_and_blocked_hosts_are_not_proxied(monkeypatch, source):
+    use_endpoint(monkeypatch, "https://champery.roundshot.com/cams/1226/default")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(snapshots.get(10))
+    assert exc.value.status_code == 403
+    use_endpoint(monkeypatch, "http://cam.owner-optout.org/img.jpg", blocked=("owner-optout.org",))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(snapshots.get(11))
+    assert exc.value.status_code == 410
+    assert source["calls"] == []  # the source was never contacted

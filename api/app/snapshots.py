@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import HTTPException
+from webcam_policy import is_blocked, is_commercial
 from webcam_resolvers import resolve
 
 from .config import settings
@@ -81,6 +82,18 @@ class Failure:
 
 _cache: "OrderedDict[int, Snapshot | Failure]" = OrderedDict()
 _locks: dict[int, asyncio.Lock] = {}
+
+
+_blocked: tuple[float, frozenset[str]] = (0.0, frozenset())
+
+
+async def blocked_hosts() -> frozenset[str]:
+    """Hosts whose owners opted out (cached one minute)."""
+    global _blocked
+    if time.monotonic() - _blocked[0] > 60:
+        rows = await get_pool().fetch("SELECT host FROM blocked_hosts")
+        _blocked = (time.monotonic(), frozenset(r["host"] for r in rows))
+    return _blocked[1]
 
 
 def _fresh(entry: "Snapshot | Failure | None") -> bool:
@@ -150,7 +163,8 @@ async def _refresh(webcam_id: int, previous: "Snapshot | Failure | None") -> "Sn
         row = await get_pool().fetchrow(
             """
             SELECT e.url, e.resolver FROM webcam_endpoints e JOIN webcams w ON w.id = e.webcam_id
-            WHERE e.webcam_id = $1 AND e.type = 'image' AND w.status <> 'rejected'
+            WHERE e.webcam_id = $1 AND e.type = 'image' AND w.status <> 'rejected' AND w.source_enabled
+              AND NOT EXISTS (SELECT 1 FROM sources x WHERE x.name = e.origin AND NOT x.enabled)
             ORDER BY (e.id = w.preview_endpoint_id) IS TRUE DESC, e.is_working DESC NULLS LAST
             LIMIT 1
             """,
@@ -158,6 +172,11 @@ async def _refresh(webcam_id: int, previous: "Snapshot | Failure | None") -> "Sn
         )
         if row is None:
             return Failure(HTTPException(404, "no image for this webcam"), now)
+        if is_commercial(row["url"]):
+            # Commercial providers sell these images: we never re-serve them (see webcam_policy).
+            return Failure(HTTPException(403, "images of this provider are not proxied"), now)
+        if is_blocked(row["url"], await blocked_hosts()):
+            return Failure(HTTPException(410, "removed at the owner's request"), now)
 
         image_url, resolved_at = row["url"], now
         if row["resolver"]:
