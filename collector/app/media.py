@@ -11,6 +11,23 @@ IMAGE_PATTERNS = re.compile(
 )
 MJPEG_PATTERNS = re.compile(r"(mjpe?g|axis-cgi/mjpg|video\.cgi|faststream|/nphmotionjpeg)", re.I)
 YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+VIDEO_EXT = (".mp4", ".m4v", ".mov", ".webm")
+
+# MIME types of <video>/<source type="..."> and HTTP Content-Type -> endpoint type
+MIME_TYPES = {
+    "application/vnd.apple.mpegurl": "hls",
+    "application/x-mpegurl": "hls",
+    "audio/mpegurl": "hls",
+    "application/dash+xml": "dash",
+    "video/mp4": "mp4",
+    "video/webm": "mp4",
+    "video/quicktime": "mp4",
+    "multipart/x-mixed-replace": "mjpeg",
+}
+
+
+def mime_to_type(mime: str | None) -> str | None:
+    return MIME_TYPES.get((mime or "").split(";")[0].strip().lower())
 
 # Magic bytes of image formats we accept as webcam snapshots.
 IMAGE_MAGIC = (
@@ -56,6 +73,10 @@ def classify_url(url: str) -> str:
         return "youtube"
     if path.endswith(".m3u8"):
         return "hls"
+    if path.endswith(".mpd"):
+        return "dash"
+    if path.endswith(VIDEO_EXT):
+        return "mp4"
     if MJPEG_PATTERNS.search(full):
         return "mjpeg"
     if path.endswith(IMAGE_EXT) or IMAGE_PATTERNS.search(full):

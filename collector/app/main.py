@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import logging
 import random
+import signal
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
@@ -55,13 +56,15 @@ def make_client() -> PoliteClient:
 
 
 async def run_once(job: Job, client: PoliteClient, **kwargs) -> None:
-    async with RunTracker(job.name) as tracker:
+    # Partial (bbox) runs are tracked apart so they never delay the scheduled world run.
+    name = f"{job.name}:bbox" if kwargs.get("bbox") else job.name
+    async with RunTracker(name) as tracker:
         await job.fn(client, tracker, **kwargs)
 
 
 async def is_due(job: Job) -> bool:
     last = await last_run(job.name)
-    if last is None:
+    if last is None or last["status"] == "aborted":  # interrupted by a restart: resume now
         return True
     wait = job.every if last["status"] in ("success", "partial") else min(job.every, RETRY_FAILED_AFTER)
     return datetime.now(timezone.utc) - last["started_at"] >= wait
@@ -118,10 +121,12 @@ def main() -> None:
     run.add_argument("--bbox", help="south,west,north,east")
     args = parser.parse_args()
 
-    if args.cmd == "run":
-        asyncio.run(one_shot(args.job, args.bbox))
-    else:
-        asyncio.run(scheduler())
+    # docker stop / timeout send SIGTERM: cancel cleanly so runs are recorded as aborted.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    try:
+        asyncio.run(one_shot(args.job, args.bbox) if args.cmd == "run" else scheduler())
+    except KeyboardInterrupt:
+        log.info("stopped")
 
 
 if __name__ == "__main__":

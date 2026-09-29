@@ -4,10 +4,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 WORKDIR /srv
 
-COPY requirements.txt .
+COPY collector/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
+COPY shared/webcam_resolvers.py ./
+COPY collector/app ./app
 
 RUN useradd --system --uid 10001 collector
 USER collector

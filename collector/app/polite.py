@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import contextlib
 import email.utils
 import ipaddress
 import logging
@@ -18,6 +19,7 @@ import socket
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Callable
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
@@ -95,6 +97,14 @@ class PoliteClient:
             follow_redirects=False,
             limits=httpx.Limits(max_connections=concurrency * 2),
         )
+        # Many IP cameras serve self-signed certificates or incomplete chains. We only read
+        # public images/pages with it (no credentials are ever sent), so we retry unverified.
+        self._insecure = httpx.AsyncClient(
+            headers={"User-Agent": user_agent},
+            timeout=httpx.Timeout(timeout, connect=10.0),
+            follow_redirects=False,
+            verify=False,
+        )
         self._robots_token = robots_token
         self._default_interval = per_host_interval
         self._host_interval: dict[str, float] = {}
@@ -106,6 +116,7 @@ class PoliteClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+        await self._insecure.aclose()
 
     def set_host_interval(self, host: str, seconds: float) -> None:
         self._host_interval[host.lower()] = seconds
@@ -133,12 +144,14 @@ class PoliteClient:
         check_public: bool = True,
         retries: int = 3,
         timeout: float | None = None,
+        until: Callable[[bytes], bool] | None = None,
     ) -> Fetched:
+        """`until(body_so_far)` returning True stops the download early (streams)."""
         host = urlsplit(url).hostname or ""
         for attempt in range(retries + 1):
             try:
                 result = await self._fetch_once(
-                    url, method, headers, params, data, max_bytes, check_public, timeout
+                    url, method, headers, params, data, max_bytes, check_public, timeout, until
                 )
             except BlockedURL:
                 raise
@@ -147,7 +160,7 @@ class PoliteClient:
             except (httpx.HTTPError, FetchError) as exc:
                 if attempt == retries:
                     raise FetchError(f"{type(exc).__name__}: {exc}") from exc
-                await self._backoff(host, attempt, None)
+                await self._backoff(host, attempt, None, type(exc).__name__)
                 continue
 
             if result.status in RETRY_STATUSES and attempt < retries:
@@ -155,20 +168,20 @@ class PoliteClient:
                 if retry_after is not None and retry_after > MAX_RETRY_AFTER:
                     self._penalize(host, retry_after)
                     return result
-                await self._backoff(host, attempt, retry_after)
+                await self._backoff(host, attempt, retry_after, f"HTTP {result.status}")
                 continue
             return result
         raise AssertionError("unreachable")
 
-    async def _backoff(self, host: str, attempt: int, retry_after: float | None) -> None:
+    async def _backoff(self, host: str, attempt: int, retry_after: float | None, reason: str) -> None:
         delay = retry_after if retry_after is not None else min(300.0, 5.0 * 2**attempt)
         delay *= random.uniform(1.0, 1.3)
-        log.info("backing off %.0fs for %s (attempt %d)", delay, host, attempt + 1)
+        log.info("backing off %.0fs for %s after %s (attempt %d)", delay, host, reason, attempt + 1)
         self._penalize(host, delay)
         await asyncio.sleep(delay)
 
     async def _fetch_once(
-        self, url, method, headers, params, data, max_bytes, check_public, timeout
+        self, url, method, headers, params, data, max_bytes, check_public, timeout, until
     ) -> Fetched:
         current = url
         for _ in range(6):
@@ -177,25 +190,32 @@ class PoliteClient:
             host = (urlsplit(current).hostname or "").lower()
             async with self._host_locks[host]:
                 await self._wait_turn(host)
-                async with self._sem:
-                    async with self._client.stream(
-                        method,
-                        current,
-                        headers=headers,
-                        params=params,
-                        content=data,
-                        timeout=timeout or httpx.USE_CLIENT_DEFAULT,
-                    ) as resp:
-                        location = resp.headers.get("location")
-                        if resp.is_redirect and location:
-                            current = urljoin(current, location)
-                            params = None
-                            if method == "POST" and resp.status_code in (301, 302, 303):
-                                method, data = "GET", None
-                            continue
-                        body, truncated = await _read_capped(resp, max_bytes)
-                        return Fetched(current, resp.status_code, resp.headers, body, truncated)
+                async with self._sem, self._stream(
+                    method, current, headers=headers, params=params, content=data,
+                    timeout=timeout or httpx.USE_CLIENT_DEFAULT,
+                ) as resp:
+                    location = resp.headers.get("location")
+                    if resp.is_redirect and location:
+                        current = urljoin(current, location)
+                        params = None
+                        if method == "POST" and resp.status_code in (301, 302, 303):
+                            method, data = "GET", None
+                        continue
+                    body, truncated = await _read_capped(resp, max_bytes, until)
+                    return Fetched(current, resp.status_code, resp.headers, body, truncated)
         raise FetchError(f"too many redirects: {url}")
+
+    @contextlib.asynccontextmanager
+    async def _stream(self, method, url, **kwargs):
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                resp = await stack.enter_async_context(self._client.stream(method, url, **kwargs))
+            except httpx.ConnectError as exc:
+                if "CERTIFICATE_VERIFY_FAILED" not in str(exc):
+                    raise
+                log.debug("invalid TLS certificate, retrying unverified: %s", url)
+                resp = await stack.enter_async_context(self._insecure.stream(method, url, **kwargs))
+            yield resp
 
     async def allowed_by_robots(self, url: str) -> bool:
         parts = urlsplit(url)
@@ -229,12 +249,14 @@ class PoliteClient:
         return parser
 
 
-async def _read_capped(resp: httpx.Response, max_bytes: int) -> tuple[bytes, bool]:
-    chunks = []
-    size = 0
+async def _read_capped(
+    resp: httpx.Response, max_bytes: int, until: Callable[[bytes], bool] | None = None
+) -> tuple[bytes, bool]:
+    body = bytearray()
     async for chunk in resp.aiter_bytes():
-        chunks.append(chunk)
-        size += len(chunk)
-        if size >= max_bytes:
-            return b"".join(chunks)[:max_bytes], True
-    return b"".join(chunks), False
+        body += chunk
+        if len(body) >= max_bytes:
+            return bytes(body[:max_bytes]), True
+        if until and until(bytes(body)):
+            return bytes(body), True
+    return bytes(body), False

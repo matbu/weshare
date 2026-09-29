@@ -25,6 +25,8 @@ SOURCE = "osm"
 TILE_DEG = 30
 MAX_SPLIT_DEPTH = 4
 QUERY_TIMEOUT = 180
+RETRY_PASSES = 2
+RETRY_PAUSE = 300
 
 QUERY = """[out:json][timeout:{timeout}][bbox:{s},{w},{n},{e}];
 (
@@ -35,6 +37,10 @@ QUERY = """[out:json][timeout:{timeout}][bbox:{s},{w},{n},{e}];
 out center tags;"""
 
 URL_TAGS = ("contact:webcam", "webcam", "camera:url", "url", "website")
+
+# Sites that OSM mappers put in contact:webcam although they are not cameras
+# (wind beacons, weather stations without camera).
+NOT_WEBCAM_HOSTS = ("pioupiou.com", "balisemeteo.com")
 NAME_TAGS = ("name", "name:en", "operator", "description")
 
 SLOT_NOW = re.compile(r"(\d+) slots? available now")
@@ -72,14 +78,20 @@ def extract(element: dict) -> WebcamRecord | None:
         return None
 
     is_webcam = tags.get("surveillance") == "webcam" or tags.get("surveillance:type") == "webcam"
+    # Weather / wind stations whose contact:webcam points to their data page.
+    if tags.get("man_made") == "monitoring_station" and not any(k.startswith("surveillance") for k in tags):
+        return None
+
     urls: list[str] = []
     for tag in URL_TAGS:
         # url/website on a generic POI (hotel, ski resort) is not the camera itself.
         if tag in ("url", "website") and not is_webcam:
             continue
         for url in split_tag_urls(tags.get(tag)):
-            if url not in urls:
+            if url not in urls and not _not_webcam_host(url):
                 urls.append(url)
+    if not urls and not is_webcam:
+        return None
 
     name = next((tags[t] for t in NAME_TAGS if tags.get(t)), None)
     webcam_page = next((u for u in urls if classify_url(u) == "page"), None)
@@ -98,6 +110,30 @@ def extract(element: dict) -> WebcamRecord | None:
         endpoints=[Endpoint(classify_url(u), u) for u in urls],
         raw=tags,
     )
+
+
+def _not_webcam_host(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in NOT_WEBCAM_HOSTS)
+
+
+async def drop_filtered(conn) -> int:
+    """Re-apply extract() to stored OSM tags, so a new filter also cleans existing rows."""
+    cur = await conn.execute(
+        "SELECT id, source_id, raw FROM webcam_sources WHERE source = %s AND raw IS NOT NULL", (SOURCE,)
+    )
+    rejected = []
+    async for row in cur:
+        osm_type, _, osm_id = row["source_id"].partition("/")
+        element = {"type": osm_type, "id": osm_id, "lat": 0.0, "lon": 0.0,
+                   "center": {"lat": 0.0, "lon": 0.0}, "tags": row["raw"]}
+        if extract(element) is None:
+            rejected.append(row["id"])
+    if rejected:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM webcam_sources WHERE id = ANY(%s)", (rejected,))
+            await store.delete_orphans(conn)
+    return len(rejected)
 
 
 def _status_url(interpreter_url: str) -> str:
@@ -137,19 +173,25 @@ async def _query(client: PoliteClient, bbox: Bbox) -> list[dict]:
                 retries=2,
             )
         except FetchError as exc:
+            log.warning("overpass: %s failed: %s", urlsplit(base).hostname, exc)
             last_error = exc
             continue
-        if resp.status == 504 or (resp.status == 200 and b'"remark"' in resp.body[-2000:]
-                                         and b"runtime error" in resp.body[-2000:]):
+        # 429/504 mean "server busy" (already retried with backoff): try the next mirror.
+        # A query that is really too heavy returns 200 with a runtime error remark.
+        tail = resp.body[-2000:]
+        if resp.status == 200 and b'"remark"' in tail and b"runtime error" in tail:
             raise TileTooHeavy(bbox)
         if resp.status != 200:
+            log.warning("overpass: %s answered HTTP %d", urlsplit(base).hostname, resp.status)
             last_error = FetchError(f"overpass HTTP {resp.status}")
             continue
         return json.loads(resp.body)["elements"]
     raise last_error or FetchError("no overpass endpoint configured")
 
 
-async def _collect_tile(client, conn, tracker: RunTracker, bbox: Bbox, depth: int = 0) -> None:
+async def _collect_tile(
+    client, conn, tracker: RunTracker, bbox: Bbox, failed: list[Bbox], depth: int = 0
+) -> None:
     try:
         elements = await _query(client, bbox)
     except TileTooHeavy:
@@ -159,11 +201,11 @@ async def _collect_tile(client, conn, tracker: RunTracker, bbox: Bbox, depth: in
             return
         log.info("overpass: splitting %s", bbox)
         for sub in split(bbox):
-            await _collect_tile(client, conn, tracker, sub, depth + 1)
+            await _collect_tile(client, conn, tracker, sub, failed, depth + 1)
         return
     except FetchError as exc:
-        log.error("overpass: tile %s failed: %s", bbox, exc)
-        tracker.incr("errors")
+        log.warning("overpass: tile %s failed, will retry at the end: %s", bbox, exc)
+        failed.append(bbox)
         return
 
     records = [r for r in (extract(el) for el in elements) if r]
@@ -182,8 +224,23 @@ async def run(client: PoliteClient, tracker: RunTracker, bbox: Bbox | None = Non
 
     tiles = [bbox] if bbox else world_tiles()
     async with await db.connect(autocommit=True) as conn:
+        tracker.incr("filtered", await drop_filtered(conn))
+        failed: list[Bbox] = []
         for tile in tiles:
-            await _collect_tile(client, conn, tracker, tile)
+            await _collect_tile(client, conn, tracker, tile, failed)
+
+        # Busy public instances: give them a break, then one more pass on failed tiles.
+        for attempt in range(RETRY_PASSES):
+            if not failed:
+                break
+            log.info("overpass: %d tiles to retry in %ds", len(failed), RETRY_PAUSE)
+            await asyncio.sleep(RETRY_PAUSE)
+            retry, failed = failed, []
+            for tile in retry:
+                await _collect_tile(client, conn, tracker, tile, failed)
+        if failed:
+            log.error("overpass: %d tiles failed: %s", len(failed), failed)
+            tracker.incr("errors", len(failed))
 
         # Only a complete, error-free world run may conclude that a webcam disappeared.
         if bbox is None and tracker.counts["errors"] == 0:

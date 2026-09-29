@@ -1,8 +1,10 @@
-"""Looks inside webcam *pages* (e.g. OSM contact:webcam) for the actual media URL.
+"""Looks inside webcam *pages* (e.g. OSM contact:webcam) for something to show.
 
-Many OSM webcams only link to an HTML page. We fetch that page once (robots.txt
-respected), extract likely snapshot / stream URLs, and hand them to the health checker
-which will validate them. Pages are re-examined at most once a month.
+Most OSM webcams only link to an HTML page. We fetch that page (robots.txt respected) and:
+- known providers (Roundshot, webcam-hd, Skaping...): dedicated extractor (app.providers);
+- other sites: generic extraction of likely snapshot / stream URLs;
+- in both cases, the page itself as an embeddable player when it allows <iframe>.
+Media found are validated by the health checker. Pages are re-examined once a month.
 """
 
 import asyncio
@@ -11,9 +13,12 @@ import re
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
-from .. import db, geo, store
+import psycopg
+
+from .. import db, geo, providers, store
 from ..config import settings
-from ..media import classify_url, normalize_url
+from ..media import classify_url, mime_to_type, normalize_url
+from ..probe import looks_like_stream, sniff
 from ..polite import BlockedURL, FetchError, PoliteClient
 from ..runs import RunTracker
 
@@ -37,7 +42,7 @@ class _Collector(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.images: list[str] = []
         self.og_images: list[str] = []
-        self.media: list[str] = []
+        self.media: list[tuple[str, str | None]] = []  # (src, type attribute)
         self.iframes: list[str] = []
 
     def handle_starttag(self, tag, attrs):
@@ -50,7 +55,7 @@ class _Collector(HTMLParser):
                     self.images.append(a[key])
         elif tag in ("video", "source"):
             if "src" in a:
-                self.media.append(a["src"])
+                self.media.append((a["src"], a.get("type")))
         elif tag == "iframe" and "src" in a:
             self.iframes.append(a["src"])
 
@@ -77,8 +82,14 @@ def extract_candidates(html: str, base_url: str) -> list[tuple[str, str]]:
 
     for url in M3U8.findall(html):
         add(url, "hls")
-    for src in parser.media:
-        add(src)
+    for src, mime in parser.media:
+        kind = mime_to_type(mime)
+        if kind is None:
+            guessed = classify_url(normalize_url(urljoin(base_url, src)) or "")
+            # A <video> src without a known extension is still a video: the health
+            # checker probes it and fixes the type if needed.
+            kind = guessed if guessed != "page" else "mp4"
+        add(src, kind)
     for src in parser.iframes:
         if classify_url(normalize_url(urljoin(base_url, src)) or "") == "youtube":
             add(src, "youtube")
@@ -89,36 +100,65 @@ def extract_candidates(html: str, base_url: str) -> list[tuple[str, str]]:
     return found[:MAX_CANDIDATES]
 
 
+INSERT_FOUND = """
+INSERT INTO webcam_endpoints (webcam_id, type, url, origin, resolver, is_working, next_check_at)
+VALUES (%s, %s, %s, %s, %s, %s, now())
+ON CONFLICT DO NOTHING
+"""
+
+
+async def _add(conn, page: dict, found: providers.Found, origin: str, tracker: RunTracker) -> None:
+    trusted = found.type in ("youtube", "iframe")
+    cur = await conn.execute(
+        INSERT_FOUND,
+        (page["webcam_id"], found.type, found.url, origin, found.resolver, True if trusted else None),
+    )
+    tracker.incr(f"found_{found.type}", cur.rowcount)
+    tracker.incr("inserted", cur.rowcount)
+
+
+async def _page_gone(conn, page: dict, tracker: RunTracker) -> None:
+    """The page no longer answers: its embed is not worth showing either."""
+    tracker.incr("unreachable")
+    await conn.execute(
+        "UPDATE webcam_endpoints SET is_working = false WHERE webcam_id = %s AND type = 'iframe' "
+        "AND origin = 'discovery' AND url = %s",
+        (page["webcam_id"], page["url"]),
+    )
+
+
 async def _discover(client: PoliteClient, conn, page: dict, tracker: RunTracker) -> None:
     url = page["url"]
     try:
         if not await client.allowed_by_robots(url):
             tracker.incr("robots_denied")
             return
-        resp = await client.fetch(url, max_bytes=2_000_000, retries=1)
-    except (BlockedURL, FetchError) as exc:
+        resp = await client.fetch(url, max_bytes=2_000_000, retries=1, until=looks_like_stream)
+    except BlockedURL:
+        tracker.incr("blocked")
+        return
+    except FetchError as exc:
         log.debug("discovery: %s: %s", url, exc)
-        tracker.incr("unreachable")
+        await _page_gone(conn, page, tracker)
         return
 
     if resp.status != 200:
-        tracker.incr("unreachable")
+        await _page_gone(conn, page, tracker)
         return
 
-    # The "page" was in fact the media itself.
-    direct = None
-    if resp.content_type.startswith("image/"):
-        direct = "image"
-    elif resp.content_type.startswith("multipart/"):
-        direct = "mjpeg"
-    elif "mpegurl" in resp.content_type:
-        direct = "hls"
+    # The "page" was in fact the media itself: decided from what it serves.
+    direct = sniff(resp.content_type, resp.body)
+    if direct == "ts":
+        direct = None
     if direct:
-        await conn.execute(
-            "UPDATE webcam_endpoints SET type = %s, next_check_at = now() WHERE id = %s",
-            (direct, page["id"]),
-        )
-        tracker.incr("inserted")
+        try:  # autocommit connection shared by concurrent tasks: no explicit transaction
+            await conn.execute(
+                "UPDATE webcam_endpoints SET type = %s, next_check_at = now() WHERE id = %s",
+                (direct, page["id"]),
+            )
+            tracker.incr("inserted")
+        except psycopg.errors.UniqueViolation:
+            tracker.incr("duplicate_media")
         return
 
     if "html" not in resp.content_type:
@@ -128,13 +168,21 @@ async def _discover(client: PoliteClient, conn, page: dict, tracker: RunTracker)
         html = resp.body.decode(charset.group(1) if charset else "utf-8", "replace")
     except LookupError:
         html = resp.body.decode("utf-8", "replace")
-    for kind, media_url in extract_candidates(html, resp.url):
-        cur = await conn.execute(
-            "INSERT INTO webcam_endpoints (webcam_id, type, url, origin, is_working) "
-            "VALUES (%s, %s, %s, 'discovery', %s) ON CONFLICT DO NOTHING",
-            (page["webcam_id"], kind, media_url, True if kind == "youtube" else None),
-        )
-        tracker.incr("inserted", cur.rowcount)
+
+    found = await providers.extract(client, resp, html)
+    origin = "provider"
+    if found is None:
+        origin = "discovery"
+        found = [providers.Found(kind, media_url) for kind, media_url in extract_candidates(html, resp.url)]
+    for item in found:
+        await _add(conn, page, item, origin, tracker)
+
+    # Whatever we found, the provider's own player is the richest view (360°, timelapse,
+    # live video): offer it when the site allows embedding.
+    if providers.frame_allowed(resp.headers):
+        await _add(conn, page, providers.Found("iframe", resp.url), "discovery", tracker)
+    else:
+        tracker.incr("frame_denied")
 
 
 async def run(client: PoliteClient, tracker: RunTracker) -> None:

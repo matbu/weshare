@@ -126,3 +126,17 @@ def test_evaluate_failure_backoff():
     assert timedelta(hours=14) < state["next_check_at"] - now < timedelta(hours=20)
     state = evaluate(_ep(fail_count=40), Check(False, error="dns"), now)
     assert state["next_check_at"] - now <= timedelta(days=7) * 1.2
+
+
+def test_find_by_url_ignores_pages():
+    from app import store
+    assert "type NOT IN ('page', 'iframe')" in store.FIND_BY_URL
+
+
+def test_evaluate_old_last_modified_is_frozen_immediately():
+    now = datetime.now(timezone.utc)
+    old = Check(True, 200, content_hash="a", last_modified="Wed, 28 May 2025 13:40:28 GMT")
+    state = evaluate(_ep(), old, now)
+    assert not state["ok"] and state["error"] == "frozen image"
+    recent = Check(True, 200, content_hash="a", last_modified=now.strftime("%a, %d %b %Y %H:%M:%S GMT"))
+    assert evaluate(_ep(), recent, now)["ok"]

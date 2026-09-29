@@ -16,7 +16,7 @@ class Settings:
         "DATABASE_URL", "postgresql://webcams:webcams@localhost:5432/webcams"
     )
     user_agent: str = os.environ.get("BOT_USER_AGENT") or (
-        "WorldWebcamsBot/1.0 (+https://example.com/bot)"
+        "WorldWebcamsBot/1.0"
     )
     # Token matched against robots.txt "User-agent:" lines.
     robots_token: str = "WorldWebcamsBot"
@@ -40,8 +40,8 @@ class Settings:
     windy_every_hours: float = _env_float("WINDY_EVERY_HOURS", 24)
     health_every_minutes: float = _env_float("HEALTH_EVERY_MINUTES", 10)
     health_batch: int = _env_int("HEALTH_BATCH", 400)
-    discovery_every_minutes: float = _env_float("DISCOVERY_EVERY_MINUTES", 30)
-    discovery_batch: int = _env_int("DISCOVERY_BATCH", 150)
+    discovery_every_minutes: float = _env_float("DISCOVERY_EVERY_MINUTES", 15)
+    discovery_batch: int = _env_int("DISCOVERY_BATCH", 300)
 
     log_level: str = os.environ.get("LOG_LEVEL", "INFO")
 

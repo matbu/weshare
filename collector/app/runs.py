@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections import Counter
@@ -34,7 +35,9 @@ class RunTracker:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
-        if exc_type:
+        if exc_type and issubclass(exc_type, (asyncio.CancelledError, KeyboardInterrupt)):
+            status = "aborted"  # stopped (deploy, docker stop): resumed at next start
+        elif exc_type:
             status = "failed"
         elif self.counts["errors"]:
             status = "partial"

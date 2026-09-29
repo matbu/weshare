@@ -14,8 +14,11 @@ NAME_SIMILARITY = 0.4
 # Endpoint types we cannot health-check ourselves: trusted on insert.
 TRUSTED_TYPES = {"youtube", "iframe"}
 
-PREVIEW_ORDER = "CASE e.type WHEN 'image' THEN 0 WHEN 'hls' THEN 1 WHEN 'mjpeg' THEN 2 " \
-                "WHEN 'youtube' THEN 3 WHEN 'iframe' THEN 4 ELSE 5 END"
+# Preview preference: a snapshot loads instantly everywhere; then live video; then players.
+PREVIEW_ORDER = (
+    "CASE e.type WHEN 'image' THEN 0 WHEN 'hls' THEN 1 WHEN 'mjpeg' THEN 2 WHEN 'dash' THEN 3 "
+    "WHEN 'youtube' THEN 4 WHEN 'mp4' THEN 5 WHEN 'iframe' THEN 6 ELSE 7 END"
+)
 
 
 @dataclass
@@ -63,7 +66,11 @@ POINT = "ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)"
 
 FIND_BY_SOURCE = "SELECT webcam_id FROM webcam_sources WHERE source = %(source)s AND source_id = %(source_id)s"
 
-FIND_BY_URL = "SELECT webcam_id FROM webcam_endpoints WHERE md5(url) = md5(%(url)s) AND url = %(url)s"
+# Only media URLs identify a camera: one page can list many cameras.
+FIND_BY_URL = """
+SELECT webcam_id FROM webcam_endpoints
+WHERE md5(url) = md5(%(url)s) AND url = %(url)s AND type NOT IN ('page', 'iframe')
+"""
 
 FIND_NEARBY = f"""
 SELECT w.id
@@ -157,6 +164,8 @@ async def upsert(conn: psycopg.AsyncConnection, rec: WebcamRecord, origin: str |
     else:
         webcam_id = None
         for ep in rec.endpoints:
+            if ep.type in ("page", "iframe"):
+                continue
             row = await _one(conn, FIND_BY_URL, {"url": ep.url})
             if row:
                 webcam_id = row["webcam_id"]
@@ -205,6 +214,12 @@ async def delete_stale_sources(conn: psycopg.AsyncConnection, source: str, seen_
         "DELETE FROM webcam_sources WHERE source = %s AND last_seen < %s", (source, seen_since)
     )
     removed = cur.rowcount
+    await delete_orphans(conn)
+    return removed
+
+
+async def delete_orphans(conn: psycopg.AsyncConnection) -> None:
+    """Webcams no source reports any more (user submissions are kept)."""
     await conn.execute(
         """
         DELETE FROM webcams w
@@ -212,4 +227,3 @@ async def delete_stale_sources(conn: psycopg.AsyncConnection, source: str, seen_
           AND NOT EXISTS (SELECT 1 FROM webcam_sources s WHERE s.webcam_id = w.id)
         """
     )
-    return removed
