@@ -38,6 +38,8 @@ class Settings:
 
     osm_every_hours: float = _env_float("OSM_EVERY_HOURS", 24 * 7)
     windy_every_hours: float = _env_float("WINDY_EVERY_HOURS", 24)
+    nzta_every_hours: float = _env_float("NZTA_EVERY_HOURS", 12)
+    caltrans_every_hours: float = _env_float("CALTRANS_EVERY_HOURS", 6)
     health_every_minutes: float = _env_float("HEALTH_EVERY_MINUTES", 10)
     health_batch: int = _env_int("HEALTH_BATCH", 400)
     discovery_every_minutes: float = _env_float("DISCOVERY_EVERY_MINUTES", 15)

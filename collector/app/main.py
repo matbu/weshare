@@ -18,7 +18,7 @@ from .config import settings
 from .jobs import discovery, health
 from .polite import PoliteClient
 from .runs import RunTracker, last_run, mark_interrupted_runs
-from .sources import osm, windy
+from .sources import caltrans, nzta, osm, windy
 
 log = logging.getLogger("collector")
 
@@ -38,6 +38,8 @@ JOBS = {
         Job("osm", timedelta(hours=settings.osm_every_hours), osm.run, accepts_bbox=True),
         Job("windy", timedelta(hours=settings.windy_every_hours), windy.run,
             enabled=bool(settings.windy_api_key), accepts_bbox=True),
+        Job("nzta", timedelta(hours=settings.nzta_every_hours), nzta.run),
+        Job("caltrans", timedelta(hours=settings.caltrans_every_hours), caltrans.run),
         Job("health", timedelta(minutes=settings.health_every_minutes), health.run),
         Job("discovery", timedelta(minutes=settings.discovery_every_minutes), discovery.run),
     )

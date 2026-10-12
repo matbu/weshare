@@ -331,7 +331,7 @@ map.on("load", () => {
     tiles: [new URL(`${API}/tiles/{z}/{x}/{y}.pbf`, location.href).href.replace(/%7B/g, "{").replace(/%7D/g, "}")],
     maxzoom: 14,
     // Windy Webcams API terms, art. 8.2: this exact acknowledgment must stay visible.
-    attribution: 'Webcams provided by <a href="https://www.windy.com/" target="_blank" rel="noopener">windy.com</a> - <a href="https://www.windy.com/webcams/add" target="_blank" rel="noopener">add new webcam</a> · Webcams © contributeurs OpenStreetMap et sites des fournisseurs',
+    attribution: 'Webcams © contributeurs OpenStreetMap, sites des fournisseurs · caméras routières © <a href="https://www.nzta.govt.nz/" target="_blank" rel="noopener">NZ Transport Agency</a> (CC BY 4.0), <a href="https://dot.ca.gov/" target="_blank" rel="noopener">Caltrans</a> · Webcams provided by <a href="https://www.windy.com/" target="_blank" rel="noopener">windy.com</a>',
   });
   map.addLayer({
     id: "clusters",

@@ -94,6 +94,22 @@ source annonce un `Last-Modified` de plus de 48 h.
 Ajouter un fournisseur : une fonction dans `providers.py` (+ un resolver si l'URL change à chaque
 capture), un test dans `collector/tests/test_providers.py`.
 
+## Sources de données
+
+| Source | Clé | Licence | Contenu |
+|---|---|---|---|
+| OpenStreetMap (Overpass) | non | ODbL | positions mondiales, liens de pages |
+| Windy Webcams API | oui (`WINDY_API_KEY`) | CGU Windy (pas de redistribution) | lecteur timelapse ; **désactivée** (images 24 h, pas du live) |
+| NZ Transport Agency (`nzta`) | non | CC BY 4.0 | caméras routières NZ, images |
+| Caltrans (`caltrans`) | non | domaine public | caméras routières Californie, **images + flux HLS** (12 districts) |
+| Ajouts utilisateurs (`user`) | — | — | webcams soumises, modérées |
+
+Un collecteur de source produit des `WebcamRecord` (voir `collector/app/store.py`) et se déclare
+comme `Job` dans `collector/app/main.py`. Les agences publiques en open data sont les meilleures
+cibles (licence claire, positions fiables, images/flux) : ajouter un pays revient à écrire un fichier
+`collector/app/sources/<agence>.py` + une ligne dans la table `sources` (migration). Voir la liste des
+grandes agences déjà présentes dans [`docs/partenariats.md`](docs/partenariats.md).
+
 ## Modération, sources et retraits
 
 Page **`/admin.html`** (compte `moderator` ou `admin`, lien « Modération » dans le menu ☰) :
